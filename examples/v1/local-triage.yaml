@@ -1,0 +1,28 @@
+name: local-triage
+version: 1
+
+inputs:
+  payload:
+    type: object
+    required: true
+
+steps:
+  - id: selected
+    uses: json.select
+    with:
+      value: ${{ inputs.payload }}
+      paths:
+        title: title
+        priority: priority
+
+  - id: route
+    uses: switch
+    with:
+      value: ${{ steps.selected.output.priority }}
+      cases:
+        high: notify
+        default: ignore
+
+outputs:
+  title: ${{ steps.selected.output.title }}
+  route: ${{ steps.route.output }}
