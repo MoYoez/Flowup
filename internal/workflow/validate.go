@@ -49,12 +49,20 @@ func Validate(wf Workflow, actions ActionCatalog) ([]Warning, error) {
 			if err := validateReferences(conditionRefs, wf.Inputs, positions, index, step.ID); err != nil {
 				return nil, err
 			}
+			for _, ref := range conditionRefs {
+				if ref.Kind == ReferenceSecret {
+					return nil, fmt.Errorf("step %q condition cannot reference secrets", step.ID)
+				}
+			}
 			if _, err := EvaluateCondition(step.If, sampleContext(wf.Inputs, conditionRefs)); err != nil {
 				return nil, fmt.Errorf("step %q condition: %w", step.ID, err)
 			}
 		}
 
 		definition := candidate.Definition()
+		if err := validateSecretPlacement(step.With, definition.SecretPaths, definition.Name); err != nil {
+			return nil, fmt.Errorf("step %q input: %w", step.ID, err)
+		}
 		if len(refs) == 0 {
 			if err := action.ValidateSchema(definition.InputSchema, step.With); err != nil {
 				return nil, fmt.Errorf("step %q input: %w", step.ID, err)
@@ -78,9 +86,67 @@ func Validate(wf Workflow, actions ActionCatalog) ([]Warning, error) {
 			if _, ok := positions[ref.Name]; !ok {
 				return nil, fmt.Errorf("workflow output references unknown step %q", ref.Name)
 			}
+		case ReferenceSecret:
+			return nil, fmt.Errorf("workflow output cannot reference secrets")
 		}
 	}
 	return nil, nil
+}
+
+func validateSecretPlacement(value any, allowedPaths []string, actionName string) error {
+	var visit func(any, string) error
+	visit = func(current any, path string) error {
+		switch typed := current.(type) {
+		case string:
+			_, ok, err := ParseSecretReference(typed)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+			if actionName == "ai.generate" && (path == "input" || strings.HasPrefix(path, "input.")) {
+				return fmt.Errorf("AI input cannot contain secret references")
+			}
+			if !secretPathAllowed(path, allowedPaths) {
+				return fmt.Errorf("secret reference is not allowed at %q", path)
+			}
+		case map[string]any:
+			for key, item := range typed {
+				child := key
+				if path != "" {
+					child = path + "." + key
+				}
+				if err := visit(item, child); err != nil {
+					return err
+				}
+			}
+		case []any:
+			for index, item := range typed {
+				if err := visit(item, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return visit(value, "")
+}
+
+func secretPathAllowed(path string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if pattern == path {
+			return true
+		}
+		if strings.HasSuffix(pattern, ".*") {
+			prefix := strings.TrimSuffix(pattern, "*")
+			remainder := strings.TrimPrefix(path, prefix)
+			if strings.HasPrefix(path, prefix) && remainder != "" && !strings.Contains(remainder, ".") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func ValidateInputs(specs map[string]InputSpec, values map[string]any) error {
