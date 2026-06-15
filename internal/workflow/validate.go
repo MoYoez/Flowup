@@ -21,6 +21,8 @@ type ActionCatalog interface {
 
 func Validate(wf Workflow, actions ActionCatalog) ([]Warning, error) {
 	positions := make(map[string]int, len(wf.Steps))
+	var warnings []Warning
+	seenApproval := false
 	for index, step := range wf.Steps {
 		positions[step.ID] = index
 	}
@@ -70,6 +72,28 @@ func Validate(wf Workflow, actions ActionCatalog) ([]Warning, error) {
 		} else if err := validateObjectStructure(definition.InputSchema, step.With); err != nil {
 			return nil, fmt.Errorf("step %q input: %w", step.ID, err)
 		}
+		effect := candidate.Effect(step.With)
+		if definition.Name == "http.request" {
+			method, _ := step.With["method"].(string)
+			if method == "GET" || method == "HEAD" {
+				effect = action.EffectReadOnly
+			} else {
+				effect = action.EffectExternal
+			}
+		}
+		if effect == action.EffectExternal && !seenApproval {
+			warnings = append(warnings, Warning{
+				Code:   "write_without_approval",
+				StepID: step.ID,
+				Message: fmt.Sprintf(
+					"external-effect step %q has no earlier approval step",
+					step.ID,
+				),
+			})
+		}
+		if definition.Name == "approval" {
+			seenApproval = true
+		}
 	}
 
 	outputRefs, err := References(wf.Outputs)
@@ -90,7 +114,7 @@ func Validate(wf Workflow, actions ActionCatalog) ([]Warning, error) {
 			return nil, fmt.Errorf("workflow output cannot reference secrets")
 		}
 	}
-	return nil, nil
+	return warnings, nil
 }
 
 func validateSecretPlacement(value any, allowedPaths []string, actionName string) error {

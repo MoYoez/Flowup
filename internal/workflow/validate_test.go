@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"testing"
+	"time"
 
 	"github.com/moyoez/flowup/internal/action"
 	switchaction "github.com/moyoez/flowup/internal/action/switch"
@@ -135,4 +136,37 @@ func TestValidateInputsChecksRequiredAndTypes(t *testing.T) {
 	require.ErrorContains(t, ValidateInputs(specs, map[string]any{"enabled": true}), `required input "name"`)
 	require.ErrorContains(t, ValidateInputs(specs, map[string]any{"name": 3}), `input "name" must be string`)
 	require.ErrorContains(t, ValidateInputs(specs, map[string]any{"name": "flowup", "extra": true}), `unknown input "extra"`)
+}
+
+func TestValidateWarnsWhenWriteHasNoEarlierApproval(t *testing.T) {
+	registry, err := action.NewRegistry(
+		externalDeclaredAction{declaredAction: declaredAction{definition: action.Definition{
+			Name: "write", InputSchema: map[string]any{"type": "object"},
+			OutputSchema: map[string]any{}, Timeout: time.Second,
+		}}},
+	)
+	require.NoError(t, err)
+	wf := mustParse(t, `
+name: warning
+version: 1
+steps:
+  - id: notify
+    uses: write
+`)
+
+	warnings, err := Validate(wf, registry)
+
+	require.NoError(t, err)
+	require.Equal(t, []Warning{{
+		Code: "write_without_approval", StepID: "notify",
+		Message: `external-effect step "notify" has no earlier approval step`,
+	}}, warnings)
+}
+
+type externalDeclaredAction struct {
+	declaredAction
+}
+
+func (externalDeclaredAction) Effect(map[string]any) action.EffectClass {
+	return action.EffectExternal
 }
