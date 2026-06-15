@@ -22,6 +22,7 @@ type Store interface {
 
 	CreateApproval(context.Context, ApprovalRecord) error
 	GetApproval(context.Context, string) (ApprovalRecord, error)
+	GetPendingApproval(context.Context, string) (ApprovalRecord, error)
 	DecideApproval(context.Context, string, ApprovalStatus, string, time.Time) (ApprovalRecord, error)
 	PauseForApproval(context.Context, ApprovalRecord, StepRecord, RunRecord, EventRecord) error
 	DecideApprovalAndUpdate(

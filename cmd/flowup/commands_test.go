@@ -122,6 +122,91 @@ steps:
 	require.Contains(t, stdout.String(), `"type":"run.succeeded"`)
 }
 
+func TestApproveCommandResumesRun(t *testing.T) {
+	workflowPath := writeFixture(t, "approval.yaml", `
+name: approval
+version: 1
+steps:
+  - id: approve
+    uses: approval
+    with: {message: Continue}
+  - id: route
+    uses: switch
+    with: {value: yes, cases: {default: done}}
+`)
+	inputsPath := writeFixture(t, "inputs.json", `{}`)
+	dbPath := filepath.Join(t.TempDir(), "flowup.db")
+	var stdout, stderr bytes.Buffer
+	require.Equal(t, 0, runCLI(context.Background(), &stdout, &stderr, []string{
+		"run", workflowPath, "--inputs", inputsPath, "--db", dbPath,
+	}), stderr.String())
+	require.Contains(t, stdout.String(), "status: waiting_approval")
+	approvalID := outputField(t, stdout.String(), "approval_id")
+
+	stdout.Reset()
+	stderr.Reset()
+	code := runCLI(context.Background(), &stdout, &stderr, []string{
+		"approve", approvalID, "--db", dbPath,
+	})
+
+	require.Equal(t, 0, code, stderr.String())
+	require.Contains(t, stdout.String(), "status: succeeded")
+}
+
+func TestRejectCommandTerminatesRun(t *testing.T) {
+	workflowPath := writeFixture(t, "approval.yaml", `
+name: approval
+version: 1
+steps:
+  - id: approve
+    uses: approval
+    with: {message: Continue}
+`)
+	inputsPath := writeFixture(t, "inputs.json", `{}`)
+	dbPath := filepath.Join(t.TempDir(), "flowup.db")
+	var stdout, stderr bytes.Buffer
+	require.Equal(t, 0, runCLI(context.Background(), &stdout, &stderr, []string{
+		"run", workflowPath, "--inputs", inputsPath, "--db", dbPath,
+	}), stderr.String())
+	approvalID := outputField(t, stdout.String(), "approval_id")
+
+	stdout.Reset()
+	stderr.Reset()
+	code := runCLI(context.Background(), &stdout, &stderr, []string{
+		"reject", approvalID, "--reason", "not now", "--db", dbPath,
+	})
+
+	require.Equal(t, 1, code)
+	require.Contains(t, stdout.String(), "status: rejected")
+}
+
+func TestResumeRefusesWaitingApproval(t *testing.T) {
+	workflowPath := writeFixture(t, "approval.yaml", `
+name: approval
+version: 1
+steps:
+  - id: approve
+    uses: approval
+    with: {message: Continue}
+`)
+	inputsPath := writeFixture(t, "inputs.json", `{}`)
+	dbPath := filepath.Join(t.TempDir(), "flowup.db")
+	var stdout, stderr bytes.Buffer
+	require.Equal(t, 0, runCLI(context.Background(), &stdout, &stderr, []string{
+		"run", workflowPath, "--inputs", inputsPath, "--db", dbPath,
+	}), stderr.String())
+	runID := outputField(t, stdout.String(), "run_id")
+
+	stdout.Reset()
+	stderr.Reset()
+	code := runCLI(context.Background(), &stdout, &stderr, []string{
+		"resume", runID, "--db", dbPath,
+	})
+
+	require.Equal(t, 1, code)
+	require.Contains(t, stderr.String(), "waiting for approval")
+}
+
 func outputField(t *testing.T, output, name string) string {
 	t.Helper()
 	prefix := name + ": "

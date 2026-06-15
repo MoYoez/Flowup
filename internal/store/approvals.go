@@ -28,6 +28,15 @@ func (s *SQLiteStore) GetApproval(ctx context.Context, id string) (ApprovalRecor
 	return getApproval(ctx, s.db, id)
 }
 
+func (s *SQLiteStore) GetPendingApproval(ctx context.Context, runID string) (ApprovalRecord, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, run_id, step_id, message, preview_json, status, reason,
+		       created_at, decided_at
+		FROM approvals WHERE run_id = ? AND status = ?
+		ORDER BY created_at LIMIT 1`, runID, ApprovalPending)
+	return scanApproval(row)
+}
+
 func (s *SQLiteStore) DecideApproval(
 	ctx context.Context,
 	id string,
@@ -82,6 +91,10 @@ func getApproval(ctx context.Context, query queryRower, id string) (ApprovalReco
 		SELECT id, run_id, step_id, message, preview_json, status, reason,
 		       created_at, decided_at
 		FROM approvals WHERE id = ?`, id)
+	return scanApproval(row)
+}
+
+func scanApproval(row scanner) (ApprovalRecord, error) {
 	var approval ApprovalRecord
 	var preview []byte
 	var createdAt, decidedAt int64
