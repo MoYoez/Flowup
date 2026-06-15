@@ -21,14 +21,14 @@ type Request struct {
 }
 
 func New(client *http.Client, network policy.NetworkPolicy) *Request {
-	if client == nil {
-		client = http.DefaultClient
-	}
 	if network.MaxResponseBytes <= 0 {
 		network.MaxResponseBytes = 1 << 20
 	}
 	if len(network.AllowedSchemes) == 0 {
 		network.AllowedSchemes = []string{"https", "http"}
+	}
+	if client == nil {
+		client = policy.GuardedHTTPClient(network)
 	}
 	return &Request{client: client, network: network}
 }
@@ -69,6 +69,40 @@ func (*Request) Effect(input map[string]any) action.EffectClass {
 		return action.EffectReadOnly
 	}
 	return action.EffectExternal
+}
+
+// Prepare validates everything that can be checked without contacting the
+// network so a malformed request fails before the engine records a durable
+// effect. This keeps unsendable requests from later being reported as
+// indeterminate during recovery.
+func (a *Request) Prepare(input map[string]any) error {
+	rawURL, _ := input["url"].(string)
+	if err := a.network.ValidateURL(rawURL); err != nil {
+		return err
+	}
+	if _, err := url.Parse(rawURL); err != nil {
+		return fmt.Errorf("parse request URL: %w", err)
+	}
+	if query, ok := input["query"].(map[string]any); ok {
+		for key, value := range query {
+			if _, err := scalarString(value); err != nil {
+				return fmt.Errorf("query %q: %w", key, err)
+			}
+		}
+	}
+	if headers, ok := input["headers"].(map[string]any); ok {
+		for key, value := range headers {
+			if _, err := scalarString(value); err != nil {
+				return fmt.Errorf("header %q: %w", key, err)
+			}
+		}
+	}
+	if value, ok := input["body"]; ok {
+		if _, err := json.Marshal(value); err != nil {
+			return fmt.Errorf("encode request body: %w", err)
+		}
+	}
+	return nil
 }
 
 func (a *Request) Execute(ctx context.Context, invocation action.Invocation) (action.Result, error) {
@@ -130,7 +164,7 @@ func (a *Request) Execute(ctx context.Context, invocation action.Invocation) (ac
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return action.Result{}, fmt.Errorf("HTTP request failed: %w", err)
+		return action.Result{}, action.Transient(fmt.Errorf("HTTP request failed: %w", err))
 	}
 	defer response.Body.Close()
 	limited := io.LimitReader(response.Body, a.network.MaxResponseBytes+1)
@@ -142,7 +176,11 @@ func (a *Request) Execute(ctx context.Context, invocation action.Invocation) (ac
 		return action.Result{}, fmt.Errorf("response exceeds %d bytes", a.network.MaxResponseBytes)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return action.Result{}, fmt.Errorf("HTTP request returned status %d", response.StatusCode)
+		statusErr := fmt.Errorf("HTTP request returned status %d", response.StatusCode)
+		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
+			return action.Result{}, action.Transient(statusErr)
+		}
+		return action.Result{}, statusErr
 	}
 	var responseBody any
 	if len(rawBody) == 0 {

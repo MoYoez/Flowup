@@ -17,20 +17,24 @@ import (
 type Option func(*Engine)
 
 type Engine struct {
-	store   store.Store
-	actions *action.Registry
-	now     func() time.Time
-	newID   func(prefix string) string
-	secrets policy.SecretSource
+	store       store.Store
+	actions     *action.Registry
+	now         func() time.Time
+	newID       func(prefix string) string
+	secrets     policy.SecretSource
+	maxAttempts int
+	backoff     func(attempt int) time.Duration
 }
 
 func New(state store.Store, actions *action.Registry, options ...Option) *Engine {
 	engine := &Engine{
-		store:   state,
-		actions: actions,
-		now:     func() time.Time { return time.Now().UTC() },
-		newID:   randomID,
-		secrets: policy.EnvSecrets{},
+		store:       state,
+		actions:     actions,
+		now:         func() time.Time { return time.Now().UTC() },
+		newID:       randomID,
+		secrets:     policy.EnvSecrets{},
+		maxAttempts: 3,
+		backoff:     func(attempt int) time.Duration { return time.Duration(attempt) * 200 * time.Millisecond },
 	}
 	for _, option := range options {
 		option(engine)
@@ -42,6 +46,20 @@ func WithSecrets(source policy.SecretSource) Option {
 	return func(engine *Engine) {
 		if source != nil {
 			engine.secrets = source
+		}
+	}
+}
+
+// WithRetry bounds how many times a transient failure from a read-only action is
+// retried, and how long to wait between attempts. External effects are never
+// retried automatically. A maxAttempts of 1 disables retries.
+func WithRetry(maxAttempts int, backoff func(attempt int) time.Duration) Option {
+	return func(engine *Engine) {
+		if maxAttempts > 0 {
+			engine.maxAttempts = maxAttempts
+		}
+		if backoff != nil {
+			engine.backoff = backoff
 		}
 	}
 }
@@ -215,6 +233,16 @@ func (e *Engine) execute(
 		var result action.Result
 		var executeErr error
 		if effectClass == action.EffectExternal {
+			if preparer, ok := candidate.(action.Preparer); ok {
+				if err := preparer.Prepare(input); err != nil {
+					step.Status = store.StepFailed
+					step.ErrorCode = CodeActionInput
+					step.ErrorMessage = err.Error()
+					step.FinishedAt = e.now()
+					_ = e.store.PutStep(ctx, step)
+					return run, e.failRun(ctx, &run, CodeActionInput, err.Error(), err)
+				}
+			}
 			effectKey = run.ID + ":" + definition.ID
 			if supplied, ok := input["idempotency_key"].(string); ok && supplied != "" {
 				effectKey = definition.Uses + ":" + supplied
@@ -249,7 +277,7 @@ func (e *Engine) execute(
 				})
 			}
 		} else {
-			result, executeErr = e.executeAction(ctx, candidate, actionDefinition, action.Invocation{
+			result, executeErr = e.executeWithRetry(ctx, candidate, actionDefinition, action.Invocation{
 				RunID: run.ID, StepID: definition.ID, Attempt: attempt, Input: input,
 				Events: eventSink{engine: e, runID: run.ID, stepID: definition.ID},
 			})
@@ -389,6 +417,33 @@ func (e *Engine) executeAction(
 	actionContext, cancel := context.WithTimeout(ctx, definition.Timeout)
 	defer cancel()
 	return candidate.Execute(actionContext, invocation)
+}
+
+// executeWithRetry retries transient failures for read-only actions. It is never
+// used for external effects, where a retry could duplicate a side effect.
+func (e *Engine) executeWithRetry(
+	ctx context.Context,
+	candidate action.Action,
+	definition action.Definition,
+	invocation action.Invocation,
+) (action.Result, error) {
+	var (
+		result action.Result
+		err    error
+	)
+	for attempt := 1; ; attempt++ {
+		result, err = e.executeAction(ctx, candidate, definition, invocation)
+		if err == nil || attempt >= e.maxAttempts || !action.IsTransient(err) {
+			return result, err
+		}
+		timer := time.NewTimer(e.backoff(attempt))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return result, err
+		case <-timer.C:
+		}
+	}
 }
 
 func (e *Engine) Approve(ctx context.Context, approvalID string) (store.RunRecord, error) {

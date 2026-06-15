@@ -80,3 +80,36 @@ Reason: duplicating comments or messages is worse than requiring manual review.
 
 Consequence: completed effect records are reused; started records are never
 blindly retried.
+
+## 2026-06-15: Block private networks by default
+
+Decision: `http.request` rejects connections to loopback, private, and
+link-local addresses unless `FLOWUP_ALLOW_PRIVATE_NETWORK` is set.
+
+Reason: untrusted data (AI output, external responses) can flow into a request
+URL, so the metadata endpoint and internal services are an SSRF target.
+
+Consequence: the check runs at dial time against the resolved IP, which also
+defeats DNS rebinding; local testing must opt in explicitly.
+
+## 2026-06-15: Retry only read-only transients
+
+Decision: the engine retries transient failures for read-only actions with
+backoff, but never retries external effects.
+
+Reason: a flaky network should not fail a whole run, yet retrying a write could
+duplicate a side effect.
+
+Consequence: actions tag retriable errors as transient; writes still rely on
+manual resume guarded by effect records.
+
+## 2026-06-15: Validate before recording effects
+
+Decision: external actions may declare a prepare step that the engine runs
+before it records the durable effect.
+
+Reason: an input that could never reach the network (a rejected URL) should not
+leave a started effect that recovery would treat as indeterminate.
+
+Consequence: pre-send validation failures fail cleanly as `action_input` and
+leave no effect record.

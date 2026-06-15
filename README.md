@@ -67,9 +67,9 @@ flowup trace <run-id> [--db <path>]
 `run` 遇到审批时会持久化暂停，并打印完整的批准和拒绝命令。SQLite 数据库默认
 位于 `.flowup/flowup.db`。
 
-## 秘密
+## Secret
 
-秘密从同名环境变量读取，并且必须占据动作声明的秘密字段完整值：
+Secret 从同名环境变量读取，并且必须占据动作声明的秘密字段完整值：
 
 ```yaml
 token: ${{ secrets.GITHUB_TOKEN }}
@@ -113,7 +113,16 @@ slack.message.send
 ```
 
 写动作使用持久化副作用记录。崩溃后如果无法确认写操作是否已经发生，Flowup
-返回 `effect_indeterminate`，不会盲目重复请求。
+返回 `effect_indeterminate`，不会盲目重复请求。可在网络前校验的输入（如非法 URL）
+会在记录副作用之前通过动作的预校验失败，因此不会被误判为 indeterminate。
+
+只读动作（GET、读连接器、`ai.generate`）的瞬时失败（连接错误、429、5xx）会
+按退避策略自动重试若干次；外部写动作永不自动重试，以免重复副作用。
+
+`http.request` 默认拒绝解析到环回 / 私网 / 链路本地地址（含云元数据端点
+`169.254.169.254`）的请求，校验在连接时按解析后的 IP 进行，可抵御 DNS 重绑定。
+设置 `FLOWUP_ALLOW_PRIVATE_NETWORK=1` 可在可信本地调试时关闭限制；
+`FLOWUP_ALLOWED_HOSTS` 则把出站主机进一步收敛到白名单。
 
 ## 非目标
 

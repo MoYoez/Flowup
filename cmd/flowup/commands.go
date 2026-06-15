@@ -333,6 +333,9 @@ func coreRegistry() (*action.Registry, error) {
 	if configured := strings.TrimSpace(os.Getenv("FLOWUP_ALLOWED_HOSTS")); configured != "" {
 		network.AllowedHosts = strings.Split(configured, ",")
 	}
+	if allowPrivate(os.Getenv("FLOWUP_ALLOW_PRIVATE_NETWORK")) {
+		network.BlockPrivateNetworks = false
+	}
 	baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
 	if baseURL == "" {
 		baseURL = "https://api.openai.com"
@@ -355,6 +358,15 @@ func coreRegistry() (*action.Registry, error) {
 		slackconnector.NewMessageGet(slackconnector.Client{}),
 		slackconnector.NewMessageSend(slackconnector.Client{}),
 	)
+}
+
+func allowPrivate(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 type defaultModelClient struct {

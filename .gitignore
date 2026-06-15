@@ -21,6 +21,11 @@
 go.work
 go.work.sum
 
+# test / coverage artifacts
+*.out
+coverage.*
+*.test
+
 # editor / OS
 .idea/
 .vscode/

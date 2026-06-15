@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -55,3 +56,36 @@ type Action interface {
 	Effect(input map[string]any) EffectClass
 	Execute(context.Context, Invocation) (Result, error)
 }
+
+// Preparer is an optional capability for external actions. The engine calls
+// Prepare with the resolved input before recording the durable effect, so any
+// input that could never have reached the network fails without leaving a
+// "started" effect record that recovery would treat as indeterminate.
+type Preparer interface {
+	Prepare(input map[string]any) error
+}
+
+// Transient wraps an error to mark it as worth retrying. The engine only retries
+// transient failures from read-only actions; external effects are never retried
+// automatically because a repeat could duplicate a side effect.
+func Transient(err error) error {
+	if err == nil {
+		return nil
+	}
+	return transientError{err: err}
+}
+
+// IsTransient reports whether err (or anything it wraps) was marked transient.
+func IsTransient(err error) bool {
+	var transient interface{ Transient() bool }
+	if errors.As(err, &transient) {
+		return transient.Transient()
+	}
+	return false
+}
+
+type transientError struct{ err error }
+
+func (t transientError) Error() string   { return t.err.Error() }
+func (t transientError) Unwrap() error   { return t.err }
+func (t transientError) Transient() bool { return true }
