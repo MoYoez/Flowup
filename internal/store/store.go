@@ -38,4 +38,13 @@ type Store interface {
 	BeginEffect(context.Context, EffectRecord) (EffectRecord, bool, error)
 	GetEffect(context.Context, string) (EffectRecord, error)
 	CompleteEffect(context.Context, string, json.RawMessage, time.Time) error
+	CompleteEffectAndStep(
+		context.Context,
+		string,
+		json.RawMessage,
+		time.Time,
+		StepRecord,
+		RunRecord,
+		EventRecord,
+	) error
 }

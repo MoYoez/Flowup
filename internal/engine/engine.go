@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/moyoez/flowup/internal/action"
+	"github.com/moyoez/flowup/internal/policy"
 	"github.com/moyoez/flowup/internal/store"
 	"github.com/moyoez/flowup/internal/workflow"
 )
@@ -20,6 +21,7 @@ type Engine struct {
 	actions *action.Registry
 	now     func() time.Time
 	newID   func(prefix string) string
+	secrets policy.SecretSource
 }
 
 func New(state store.Store, actions *action.Registry, options ...Option) *Engine {
@@ -28,11 +30,20 @@ func New(state store.Store, actions *action.Registry, options ...Option) *Engine
 		actions: actions,
 		now:     func() time.Time { return time.Now().UTC() },
 		newID:   randomID,
+		secrets: policy.EnvSecrets{},
 	}
 	for _, option := range options {
 		option(engine)
 	}
 	return engine
+}
+
+func WithSecrets(source policy.SecretSource) Option {
+	return func(engine *Engine) {
+		if source != nil {
+			engine.secrets = source
+		}
+	}
 }
 
 func withClock(now func() time.Time) Option {
@@ -153,7 +164,7 @@ func (e *Engine) execute(
 		if err != nil {
 			return run, e.failRun(ctx, &run, CodeActionInput, "resolve action input", err)
 		}
-		input, ok := resolved.(map[string]any)
+		opaqueInput, ok := resolved.(map[string]any)
 		if !ok {
 			return run, e.failRun(ctx, &run, CodeActionInput, "action input must be an object", nil)
 		}
@@ -162,10 +173,18 @@ func (e *Engine) execute(
 			return run, e.failRun(ctx, &run, CodeInvalidWorkflow, "unknown action "+definition.Uses, nil)
 		}
 		actionDefinition := candidate.Definition()
+		input, redactedInput, err := policy.ResolveSecrets(
+			opaqueInput,
+			actionDefinition.SecretPaths,
+			e.secrets,
+		)
+		if err != nil {
+			return run, e.failRun(ctx, &run, CodePolicyViolation, err.Error(), err)
+		}
 		if err := action.ValidateSchema(actionDefinition.InputSchema, input); err != nil {
 			return run, e.failRun(ctx, &run, CodeActionInput, err.Error(), err)
 		}
-		rawInput, err := json.Marshal(input)
+		rawInput, err := json.Marshal(redactedInput)
 		if err != nil {
 			return run, e.failRun(ctx, &run, CodeActionInput, "encode action input", err)
 		}
@@ -190,12 +209,51 @@ func (e *Engine) execute(
 			return run, e.failRun(ctx, &run, CodePersistence, "append step start event", err)
 		}
 
-		actionContext, cancel := context.WithTimeout(ctx, actionDefinition.Timeout)
-		result, executeErr := candidate.Execute(actionContext, action.Invocation{
-			RunID: run.ID, StepID: definition.ID, Attempt: attempt, Input: input,
-			Events: eventSink{engine: e, runID: run.ID, stepID: definition.ID},
-		})
-		cancel()
+		effectClass := candidate.Effect(input)
+		effectKey := ""
+		effectReused := false
+		var result action.Result
+		var executeErr error
+		if effectClass == action.EffectExternal {
+			effectKey = run.ID + ":" + definition.ID
+			if supplied, ok := input["idempotency_key"].(string); ok && supplied != "" {
+				effectKey = definition.Uses + ":" + supplied
+			}
+			effect, created, err := e.store.BeginEffect(ctx, store.EffectRecord{
+				Key: effectKey, RunID: run.ID, StepID: definition.ID,
+				ActionName: definition.Uses, Status: store.EffectStarted, CreatedAt: e.now(),
+			})
+			if err != nil {
+				return run, e.failRun(ctx, &run, CodePersistence, "begin external effect", err)
+			}
+			if !created {
+				if effect.Status == store.EffectCompleted {
+					result.Output = effect.Output
+					effectReused = true
+				} else {
+					step.Status = store.StepFailed
+					step.ErrorCode = CodeEffectIndeterminate
+					step.ErrorMessage = "external effect may have occurred"
+					step.FinishedAt = e.now()
+					_ = e.store.PutStep(ctx, step)
+					return run, e.failRun(
+						ctx, &run, CodeEffectIndeterminate,
+						"external effect may have occurred; refusing to repeat it", nil,
+					)
+				}
+			} else {
+				result, executeErr = e.executeAction(ctx, candidate, actionDefinition, action.Invocation{
+					RunID: run.ID, StepID: definition.ID, Attempt: attempt, Input: input,
+					IdempotencyKey: effectKey,
+					Events:         eventSink{engine: e, runID: run.ID, stepID: definition.ID},
+				})
+			}
+		} else {
+			result, executeErr = e.executeAction(ctx, candidate, actionDefinition, action.Invocation{
+				RunID: run.ID, StepID: definition.ID, Attempt: attempt, Input: input,
+				Events: eventSink{engine: e, runID: run.ID, stepID: definition.ID},
+			})
+		}
 		if executeErr != nil {
 			step.Status = store.StepFailed
 			step.ErrorCode = CodeActionPermanent
@@ -252,6 +310,37 @@ func (e *Engine) execute(
 		step.Output = append(json.RawMessage(nil), result.Output...)
 		step.Status = store.StepSucceeded
 		step.FinishedAt = e.now()
+		run.CurrentStep = index + 1
+		run.UpdatedAt = e.now()
+		if effectClass == action.EffectExternal {
+			if effectReused {
+				if err := e.store.PutStep(ctx, step); err != nil {
+					return run, e.failRun(ctx, &run, CodePersistence, "persist reused effect step", err)
+				}
+				if err := e.appendEvent(ctx, run.ID, definition.ID, "step.succeeded", map[string]any{
+					"attempt": attempt,
+					"reused":  true,
+				}); err != nil {
+					return run, e.failRun(ctx, &run, CodePersistence, "append reused effect event", err)
+				}
+				if err := e.store.UpdateRun(ctx, run); err != nil {
+					return run, coded(CodePersistence, "advance reused effect step", err)
+				}
+				continue
+			}
+			event, err := makeEvent(run.ID, definition.ID, "step.succeeded", map[string]any{
+				"attempt": attempt,
+			}, e.now())
+			if err != nil {
+				return run, e.failRun(ctx, &run, CodePersistence, "encode step success event", err)
+			}
+			if err := e.store.CompleteEffectAndStep(
+				ctx, effectKey, result.Output, e.now(), step, run, event,
+			); err != nil {
+				return run, e.failRun(ctx, &run, CodePersistence, "complete external effect", err)
+			}
+			continue
+		}
 		if err := e.store.PutStep(ctx, step); err != nil {
 			return run, e.failRun(ctx, &run, CodePersistence, "persist successful step", err)
 		}
@@ -260,8 +349,6 @@ func (e *Engine) execute(
 		}); err != nil {
 			return run, e.failRun(ctx, &run, CodePersistence, "append step success event", err)
 		}
-		run.CurrentStep = index + 1
-		run.UpdatedAt = e.now()
 		if err := e.store.UpdateRun(ctx, run); err != nil {
 			return run, coded(CodePersistence, "advance successful step", err)
 		}
@@ -291,6 +378,17 @@ func (e *Engine) execute(
 		return run, coded(CodePersistence, "append run success event", err)
 	}
 	return run, nil
+}
+
+func (e *Engine) executeAction(
+	ctx context.Context,
+	candidate action.Action,
+	definition action.Definition,
+	invocation action.Invocation,
+) (action.Result, error) {
+	actionContext, cancel := context.WithTimeout(ctx, definition.Timeout)
+	defer cancel()
+	return candidate.Execute(actionContext, invocation)
 }
 
 func (e *Engine) Approve(ctx context.Context, approvalID string) (store.RunRecord, error) {
@@ -419,7 +517,7 @@ func (e *Engine) appendEvent(
 ) error {
 	raw := json.RawMessage(`{}`)
 	if data != nil {
-		encoded, err := json.Marshal(data)
+		encoded, err := json.Marshal(policy.Redact(data))
 		if err != nil {
 			return err
 		}

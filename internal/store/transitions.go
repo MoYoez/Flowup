@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -41,6 +42,50 @@ func (s *SQLiteStore) PauseForApproval(
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit approval pause: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) CompleteEffectAndStep(
+	ctx context.Context,
+	key string,
+	output json.RawMessage,
+	completedAt time.Time,
+	step StepRecord,
+	run RunRecord,
+	event EventRecord,
+) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin effect completion: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE effects SET status = ?, output_json = ?, completed_at = ?
+		WHERE key = ? AND status = ?`,
+		EffectCompleted, []byte(output), encodeTime(completedAt), key, EffectStarted,
+	)
+	if err != nil {
+		return fmt.Errorf("complete transition effect: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("effect transition rows affected: %w", err)
+	}
+	if count == 0 {
+		return ErrConflict
+	}
+	if err := putStepTx(ctx, tx, step); err != nil {
+		return err
+	}
+	if err := updateRunTx(ctx, tx, run); err != nil {
+		return err
+	}
+	if err := appendEventTx(ctx, tx, event); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit effect completion: %w", err)
 	}
 	return nil
 }
