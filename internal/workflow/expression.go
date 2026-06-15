@@ -24,8 +24,9 @@ type Context struct {
 type ReferenceKind string
 
 const (
-	ReferenceInput ReferenceKind = "input"
-	ReferenceStep  ReferenceKind = "step"
+	ReferenceInput  ReferenceKind = "input"
+	ReferenceStep   ReferenceKind = "step"
+	ReferenceSecret ReferenceKind = "secret"
 )
 
 type Reference struct {
@@ -35,7 +36,7 @@ type Reference struct {
 }
 
 var embeddedExpressionPattern = regexp.MustCompile(`\$\{\{\s*(.*?)\s*\}\}`)
-var referencePattern = regexp.MustCompile(`\b(?:inputs\.[A-Za-z_][A-Za-z0-9_-]*|steps\.[A-Za-z_][A-Za-z0-9_-]*\.(?:status|output(?:\.[A-Za-z_][A-Za-z0-9_-]*)*))\b`)
+var referencePattern = regexp.MustCompile(`\b(?:inputs\.[A-Za-z_][A-Za-z0-9_-]*|steps\.[A-Za-z_][A-Za-z0-9_-]*\.(?:status|output(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)|secrets\.[A-Za-z_][A-Za-z0-9_]*)\b`)
 
 func Resolve(value any, context Context) (any, error) {
 	switch typed := value.(type) {
@@ -67,6 +68,11 @@ func Resolve(value any, context Context) (any, error) {
 }
 
 func resolveString(source string, context Context) (any, error) {
+	if ref, ok, err := ParseSecretReference(source); err != nil {
+		return nil, err
+	} else if ok {
+		return ref, nil
+	}
 	matches := embeddedExpressionPattern.FindAllStringSubmatchIndex(source, -1)
 	if len(matches) == 0 {
 		return source, nil
@@ -130,6 +136,9 @@ func parseReference(source string) (Reference, error) {
 	if len(parts) == 2 && parts[0] == "inputs" && parts[1] != "" {
 		return Reference{Kind: ReferenceInput, Name: parts[1]}, nil
 	}
+	if len(parts) == 2 && parts[0] == "secrets" && secretNamePattern.MatchString(parts[1]) {
+		return Reference{Kind: ReferenceSecret, Name: parts[1]}, nil
+	}
 	if len(parts) >= 3 && parts[0] == "steps" && parts[1] != "" {
 		path := strings.Join(parts[2:], ".")
 		if path == "status" || path == "output" || strings.HasPrefix(path, "output.") {
@@ -170,6 +179,8 @@ func resolveReference(ref Reference, context Context) (any, error) {
 			}
 		}
 		return value, nil
+	case ReferenceSecret:
+		return SecretRef{Name: ref.Name}, nil
 	default:
 		return nil, fmt.Errorf("unsupported reference kind %q", ref.Kind)
 	}
