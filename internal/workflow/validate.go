@@ -96,6 +96,9 @@ func Validate(wf Workflow, actions ActionCatalog) ([]Warning, error) {
 		}
 	}
 
+	if err := validateValueExpressions(wf.Outputs); err != nil {
+		return nil, fmt.Errorf("workflow outputs: %w", err)
+	}
 	outputRefs, err := References(wf.Outputs)
 	if err != nil {
 		return nil, fmt.Errorf("workflow outputs: %w", err)

@@ -107,6 +107,24 @@ outputs:
 	require.ErrorContains(t, err, `workflow output references unknown step "missing"`)
 }
 
+func TestValidateRejectsMalformedWorkflowOutputExpression(t *testing.T) {
+	wf := mustParse(t, `
+name: bad-output-expression
+version: 1
+steps:
+  - id: route
+    uses: switch
+    with: {value: high, cases: {default: notify}}
+outputs:
+  result: ${{ contains(steps.route.output, "notify") }}
+`)
+
+	_, err := Validate(wf, testRegistry(t))
+
+	require.ErrorContains(t, err, "workflow outputs")
+	require.ErrorContains(t, err, "invalid reference")
+}
+
 func TestValidateAcceptsReferencesToEarlierSteps(t *testing.T) {
 	wf := mustParse(t, `
 name: valid

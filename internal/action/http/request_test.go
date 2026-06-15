@@ -70,6 +70,60 @@ func TestRequestEnforcesResponseLimit(t *testing.T) {
 	require.ErrorContains(t, err, "response exceeds 32 bytes")
 }
 
+func TestRequestValidatesRedirectTarget(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, `{"unexpected":true}`)
+	}))
+	defer target.Close()
+	targetURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+	redirector := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, targetURL, http.StatusFound)
+	}))
+	defer redirector.Close()
+	candidate := New(redirector.Client(), policy.NetworkPolicy{
+		AllowedSchemes:   []string{"http"},
+		AllowedHosts:     []string{hostOf(t, redirector.URL)},
+		MaxResponseBytes: 1024,
+	})
+
+	_, err := candidate.Execute(context.Background(), action.Invocation{Input: map[string]any{
+		"method": "GET",
+		"url":    redirector.URL,
+	}})
+
+	require.ErrorContains(t, err, "is not allowed")
+}
+
+func TestRequestValidatesRedirectAfterClientRewritesTarget(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, `{"unexpected":true}`)
+	}))
+	defer target.Close()
+	targetURL, err := url.Parse(strings.Replace(target.URL, "127.0.0.1", "localhost", 1))
+	require.NoError(t, err)
+	redirector := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, "/next", http.StatusFound)
+	}))
+	defer redirector.Close()
+	client := redirector.Client()
+	client.CheckRedirect = func(request *http.Request, _ []*http.Request) error {
+		request.URL = targetURL
+		return nil
+	}
+	candidate := New(client, policy.NetworkPolicy{
+		AllowedSchemes:   []string{"http"},
+		AllowedHosts:     []string{hostOf(t, redirector.URL)},
+		MaxResponseBytes: 1024,
+	})
+
+	_, err = candidate.Execute(context.Background(), action.Invocation{Input: map[string]any{
+		"method": "GET",
+		"url":    redirector.URL,
+	}})
+
+	require.ErrorContains(t, err, "is not allowed")
+}
+
 func hostOf(t *testing.T, raw string) string {
 	t.Helper()
 	parsed, err := url.Parse(raw)

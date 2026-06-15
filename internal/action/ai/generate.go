@@ -70,15 +70,18 @@ func (a *Generate) Execute(ctx context.Context, invocation action.Invocation) (a
 	}
 	maxAttempts := integerOption(invocation.Input, "max_attempts", 1)
 	maxTokens := integerOption(invocation.Input, "max_tokens", 2048)
+	timeout := time.Duration(integerOption(invocation.Input, "timeout_seconds", 30)) * time.Second
 	temperature := numberOption(invocation.Input, "temperature", 0)
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		modelName := models[min(attempt-1, len(models)-1)]
 		started := time.Now()
-		response, generateErr := a.client.Generate(ctx, model.Request{
+		attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+		response, generateErr := a.client.Generate(attemptCtx, model.Request{
 			Model: modelName, Prompt: prompt, Input: projectedJSON,
 			OutputSchema: schema, MaxTokens: maxTokens, Temperature: temperature,
 		})
+		cancel()
 		valid := false
 		validationMessage := ""
 		if generateErr == nil {

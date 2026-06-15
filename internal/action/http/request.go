@@ -116,7 +116,19 @@ func (a *Request) Execute(ctx context.Context, invocation action.Invocation) (ac
 			request.Header.Set(key, text)
 		}
 	}
-	response, err := a.client.Do(request)
+	client := *a.client
+	checkRedirect := client.CheckRedirect
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if checkRedirect != nil {
+			if err := checkRedirect(request, via); err != nil {
+				return err
+			}
+		} else if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		return a.network.ValidateURL(request.URL.String())
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return action.Result{}, fmt.Errorf("HTTP request failed: %w", err)
 	}

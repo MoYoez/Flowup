@@ -3,7 +3,9 @@ package aiaction
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/moyoez/flowup/internal/action"
 	"github.com/moyoez/flowup/internal/model"
@@ -106,4 +108,31 @@ func TestGenerateRejectsBothModelForms(t *testing.T) {
 	}})
 
 	require.ErrorContains(t, err, "cannot specify both model and models")
+}
+
+type blockingClient struct{}
+
+func (blockingClient) Generate(ctx context.Context, _ model.Request) (model.Response, error) {
+	select {
+	case <-ctx.Done():
+		return model.Response{}, ctx.Err()
+	case <-time.After(1500 * time.Millisecond):
+		return model.Response{}, errors.New("client timeout")
+	}
+}
+
+func TestGenerateHonorsTimeoutSeconds(t *testing.T) {
+	candidate := New(blockingClient{})
+	started := time.Now()
+
+	_, err := candidate.Execute(context.Background(), action.Invocation{Input: map[string]any{
+		"model":           "small",
+		"prompt":          "Classify",
+		"input":           map[string]any{},
+		"output_schema":   map[string]any{"type": "object"},
+		"timeout_seconds": 1,
+	}})
+
+	require.Error(t, err)
+	require.Less(t, time.Since(started), 1300*time.Millisecond)
 }
