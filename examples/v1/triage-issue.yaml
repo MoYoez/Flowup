@@ -1,0 +1,55 @@
+name: triage-issue
+version: 1
+
+inputs:
+  issue_url:
+    type: string
+    required: true
+
+steps:
+  - id: issue
+    uses: github.issue.get
+    with:
+      url: ${{ inputs.issue_url }}
+      token: ${{ secrets.GITHUB_TOKEN }}
+
+  - id: classify
+    uses: ai.generate
+    with:
+      model: default
+      prompt: Classify the issue priority.
+      input:
+        title: ${{ steps.issue.output.title }}
+        body: ${{ steps.issue.output.body }}
+      output_schema:
+        type: object
+        required: [priority]
+        properties:
+          priority:
+            type: string
+            enum: [low, medium, high]
+
+  - id: route
+    uses: switch
+    with:
+      value: ${{ steps.classify.output.priority }}
+      cases:
+        high: approval
+        default: notify
+
+  - id: approve_alert
+    uses: approval
+    if: ${{ steps.route.output == "approval" }}
+    with:
+      message: Send a high-priority issue alert.
+
+  - id: notify
+    uses: slack.message.send
+    if: ${{ steps.route.output == "notify" || steps.approve_alert.status == "approved" }}
+    with:
+      channel: engineering
+      text: New ${{ steps.classify.output.priority }} issue
+      token: ${{ secrets.SLACK_TOKEN }}
+
+outputs:
+  priority: ${{ steps.classify.output.priority }}

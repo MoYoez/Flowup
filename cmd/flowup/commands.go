@@ -16,6 +16,8 @@ import (
 	httpaction "github.com/moyoez/flowup/internal/action/http"
 	jsonaction "github.com/moyoez/flowup/internal/action/json"
 	switchaction "github.com/moyoez/flowup/internal/action/switch"
+	githubconnector "github.com/moyoez/flowup/internal/connector/github"
+	slackconnector "github.com/moyoez/flowup/internal/connector/slack"
 	"github.com/moyoez/flowup/internal/engine"
 	"github.com/moyoez/flowup/internal/model"
 	"github.com/moyoez/flowup/internal/policy"
@@ -346,6 +348,12 @@ func coreRegistry() (*action.Registry, error) {
 		switchaction.New(),
 		aiaction.New(modelClient),
 		approvalaction.New(),
+		githubconnector.NewIssueGet(githubconnector.Client{}),
+		githubconnector.NewIssueComment(githubconnector.Client{}),
+		githubconnector.NewPullRequestGet(githubconnector.Client{}),
+		githubconnector.NewPullRequestComment(githubconnector.Client{}),
+		slackconnector.NewMessageGet(slackconnector.Client{}),
+		slackconnector.NewMessageSend(slackconnector.Client{}),
 	)
 }
 
