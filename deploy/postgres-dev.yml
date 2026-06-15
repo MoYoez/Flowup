@@ -1,0 +1,13 @@
+# 最小 Postgres,供本地 #4 验证 / DBOS 对照臂用(端口 55432 避免与本机 5432 冲突)。
+# 起:  docker-compose -f deploy/postgres-dev.yml up -d
+# 停:  docker-compose -f deploy/postgres-dev.yml down -v
+# DSN: host=localhost port=55432 user=flowup password=flowup dbname=flowup sslmode=disable
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: flowup
+      POSTGRES_PASSWORD: flowup
+      POSTGRES_DB: flowup
+    ports:
+      - "55432:5432"
