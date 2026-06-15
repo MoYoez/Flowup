@@ -2,8 +2,6 @@
 /bin/
 *.exe
 
-/docs/
-
 # local durable state (SQLite event store / state projection)
 *.db
 *.db-shm
