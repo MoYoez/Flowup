@@ -205,7 +205,29 @@ func (e *Engine) execute(
 			return run, e.failRun(ctx, &run, CodeActionPermanent, "execute action", executeErr)
 		}
 		if result.Pause != nil {
-			return run, e.failRun(ctx, &run, CodeActionPermanent, "action pause is not supported yet", nil)
+			if result.Pause.Kind != "approval" {
+				return run, e.failRun(ctx, &run, CodeActionPermanent, "unsupported pause kind", nil)
+			}
+			now := e.now()
+			approval := store.ApprovalRecord{
+				ID: e.newID("approval"), RunID: run.ID, StepID: definition.ID,
+				Message: result.Pause.Message, Preview: result.Pause.Preview,
+				Status: store.ApprovalPending, CreatedAt: now,
+			}
+			step.Status = store.StepWaitingApproval
+			run.Status = store.RunWaitingApproval
+			run.UpdatedAt = now
+			event, err := makeEvent(run.ID, definition.ID, "approval.requested", map[string]any{
+				"approval_id": approval.ID,
+				"message":     approval.Message,
+			}, now)
+			if err != nil {
+				return run, e.failRun(ctx, &run, CodePersistence, "encode approval event", err)
+			}
+			if err := e.store.PauseForApproval(ctx, approval, step, run, event); err != nil {
+				return run, e.failRun(ctx, &run, CodePersistence, "persist approval pause", err)
+			}
+			return run, nil
 		}
 		var output any
 		if len(result.Output) == 0 {
@@ -271,6 +293,80 @@ func (e *Engine) execute(
 	return run, nil
 }
 
+func (e *Engine) Approve(ctx context.Context, approvalID string) (store.RunRecord, error) {
+	return e.decideApproval(ctx, approvalID, store.ApprovalApproved, "")
+}
+
+func (e *Engine) Reject(ctx context.Context, approvalID, reason string) (store.RunRecord, error) {
+	return e.decideApproval(ctx, approvalID, store.ApprovalRejected, reason)
+}
+
+func (e *Engine) decideApproval(
+	ctx context.Context,
+	approvalID string,
+	decision store.ApprovalStatus,
+	reason string,
+) (store.RunRecord, error) {
+	approval, err := e.store.GetApproval(ctx, approvalID)
+	if err != nil {
+		return store.RunRecord{}, coded(CodePersistence, "load approval", err)
+	}
+	if approval.Status != store.ApprovalPending {
+		return store.RunRecord{}, coded(CodeActionPermanent, "approval is already decided", store.ErrConflict)
+	}
+	run, err := e.store.GetRun(ctx, approval.RunID)
+	if err != nil {
+		return store.RunRecord{}, coded(CodePersistence, "load approval run", err)
+	}
+	step, err := e.store.GetStep(ctx, approval.RunID, approval.StepID)
+	if err != nil {
+		return run, coded(CodePersistence, "load approval step", err)
+	}
+	now := e.now()
+	eventType := "approval.approved"
+	output := map[string]any{"approved": true}
+	if decision == store.ApprovalRejected {
+		eventType = "approval.rejected"
+		output = map[string]any{"approved": false, "reason": reason}
+		step.Status = store.StepRejected
+		run.Status = store.RunRejected
+	} else {
+		step.Status = store.StepApproved
+		run.Status = store.RunRunning
+		run.CurrentStep = step.StepIndex + 1
+	}
+	step.Output, err = json.Marshal(output)
+	if err != nil {
+		return run, coded(CodePersistence, "encode approval output", err)
+	}
+	step.FinishedAt = now
+	run.UpdatedAt = now
+	event, err := makeEvent(run.ID, step.StepID, eventType, map[string]any{
+		"approval_id": approvalID,
+		"reason":      reason,
+	}, now)
+	if err != nil {
+		return run, coded(CodePersistence, "encode approval decision event", err)
+	}
+	if _, err := e.store.DecideApprovalAndUpdate(
+		ctx, approvalID, decision, reason, now, step, run, event,
+	); err != nil {
+		return run, coded(CodePersistence, "persist approval decision", err)
+	}
+	if decision == store.ApprovalRejected {
+		return run, nil
+	}
+	wf, err := workflow.Parse(run.WorkflowYAML)
+	if err != nil {
+		return run, e.failRun(ctx, &run, CodeInvalidWorkflow, "parse stored workflow", err)
+	}
+	var inputs map[string]any
+	if err := json.Unmarshal(run.Inputs, &inputs); err != nil {
+		return run, e.failRun(ctx, &run, CodePersistence, "decode stored inputs", err)
+	}
+	return e.execute(ctx, wf, run, inputs)
+}
+
 func (e *Engine) expressionContext(
 	ctx context.Context,
 	runID string,
@@ -332,6 +428,26 @@ func (e *Engine) appendEvent(
 	return e.store.AppendEvent(ctx, store.EventRecord{
 		RunID: runID, StepID: stepID, Type: eventType, Data: raw, CreatedAt: e.now(),
 	})
+}
+
+func makeEvent(
+	runID string,
+	stepID string,
+	eventType string,
+	data any,
+	createdAt time.Time,
+) (store.EventRecord, error) {
+	raw := json.RawMessage(`{}`)
+	if data != nil {
+		encoded, err := json.Marshal(data)
+		if err != nil {
+			return store.EventRecord{}, err
+		}
+		raw = encoded
+	}
+	return store.EventRecord{
+		RunID: runID, StepID: stepID, Type: eventType, Data: raw, CreatedAt: createdAt,
+	}, nil
 }
 
 type eventSink struct {
