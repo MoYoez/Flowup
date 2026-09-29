@@ -1,0 +1,34 @@
+name: local-approval
+version: 1
+
+inputs:
+  message:
+    type: string
+    required: true
+
+steps:
+  - id: review
+    uses: approval
+    with:
+      message: 'Confirm this local demo: ${{ inputs.message }}'
+      preview:
+        message: ${{ inputs.message }}
+
+  - id: result
+    uses: json.validate
+    with:
+      value:
+        message: ${{ inputs.message }}
+        approved: ${{ steps.review.output.approved }}
+      schema:
+        type: object
+        required: [message, approved]
+        properties:
+          message:
+            type: string
+          approved:
+            type: boolean
+        additionalProperties: false
+
+outputs:
+  result: ${{ steps.result.output }}
