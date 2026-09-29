@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/moyoez/flowup/internal/workflow"
@@ -102,6 +103,45 @@ func pathAllowed(path string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// SecretValues uses the same field and array paths as ResolveSecrets.
+func SecretValues(value any, allowedPaths []string) []string {
+	var values []string
+	var visit func(any, string)
+	visit = func(value any, path string) {
+		switch v := value.(type) {
+		case string:
+			if v != "" && pathAllowed(path, allowedPaths) {
+				values = append(values, v)
+			}
+		case map[string]any:
+			for key, item := range v {
+				child := key
+				if path != "" {
+					child = path + "." + key
+				}
+				visit(item, child)
+			}
+		case []any:
+			for i, item := range v {
+				visit(item, fmt.Sprintf("%s[%d]", path, i))
+			}
+		}
+	}
+	visit(value, "")
+	return values
+}
+
+func RedactText(text string, values []string) string {
+	values = append([]string(nil), values...)
+	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	for _, value := range values {
+		if value != "" {
+			text = strings.ReplaceAll(text, value, "[REDACTED]")
+		}
+	}
+	return text
 }
 
 var sensitiveKeyPattern = regexp.MustCompile(`(?i)(token|secret|password|authorization|api[_-]?key|private[_-]?key)`)

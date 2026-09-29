@@ -1,0 +1,19 @@
+# Local action plugins
+
+The user approved local plugins: trusted scripts or executables can add actions without rebuilding Flowup. Plugins run as child processes, exchanging one JSON request and one JSON response. The existing engine retains validation, approval, event history and external-effect handling.
+
+## Contract
+
+- Explicit project-local installation: `flowup plugin install <directory or manifest>` copies declared files and registers action names under the current directory's `.flowup/plugins/`; `uninstall <name>` removes discovery for new runs but retains version files for saved runs. Updates install a new copy. `validate` and `run` discover only referenced installed actions. An optional `--plugins <manifest.yaml>` overrides discovery for development. No downloads, installation hooks, market or arbitrary workflow-supplied commands.
+- Manifest `version: 1`, with a `plugins` list. Each action has a namespaced `name`, package `version`, `command` argv, `files` (declared code/config dependencies), input/output schemas, `effect` (`read_only` or `external`), positive `timeout`, optional `secret_paths` and optional inherited `env` names.
+- Commands and working directories are resolved relative to the manifest, independent of the workflow location. Bare executables resolve through PATH once. No implicit shell; dynamic workflow values travel through stdin, never command interpolation.
+- Protocol request: `protocol_version`, `run_id`, `step_id`, `attempt`, `idempotency_key`, `input`. Success: `{"output": ...}`. Failure: `{"error":{"message":"...","transient":false}}`. Exactly one response is required; no plugin-driven pause or approval. Nonzero exit is failure. Stdout is bounded to 1 MiB, stderr to 64 KiB and not persisted or echoed; timeout/cancellation terminates the direct child, with bounded pipe waiting.
+- Runtime environment is minimal (PATH, Windows system variables, temp directories) plus explicit manifest allowlist. Referenced secrets are delivered only through input. This reduces accidental inheritance; it is not a sandbox. Plugin output is stored as provided and must not contain secrets.
+- Installation supports a manifest directory containing `plugin.yaml`, or a manifest file. Standalone absolute arguments pointing at declared files relocate to the copied files; embedded paths in code/flags are not parsed. `.flowup-manifest.json` is reserved. Windows app execution aliases are not readable binaries; use a real interpreter path. Installs/uninstalls are serialized by the caller in v1; version-cache garbage collection is out of scope.
+- Persist a resolved binding snapshot in the run before its first action. It includes manifest definitions, absolute paths and SHA-256 of executable and declared files, but no environment values or credentials. Restore from this snapshot for approve/resume, even from a different directory or after the manifest is moved. Reject/status/trace remain available when a plugin is missing.
+- Verify pinned files before approval changes state and before each invocation. Drift blocks continuation; restoring files permits continuation. Dependencies not declared in `files`, interpreter packages and external data are not pinned. Do not claim immutable or sandboxed execution.
+- Default output/effect semantics remain those of core actions: transient retries only for declared read-only actions; no automatic write retry and no guarantee of exactly-once delivery. Plugins cannot override built-ins.
+
+## Validation
+
+Real subprocess tests cover successful JSON exchange, schemas, malformed/trailing/oversized output, nonzero exit, timeout, inherited environment, redacted stored input, duplicate actions, configuration-only validation, reopen/approve/resume, executable or file drift, and read/write retry policy. Existing core-only workflows and old SQLite databases remain compatible. Include a self-contained Python example with an approval step and plain-language docs.

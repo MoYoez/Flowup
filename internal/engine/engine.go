@@ -17,13 +17,14 @@ import (
 type Option func(*Engine)
 
 type Engine struct {
-	store       store.Store
-	actions     *action.Registry
-	now         func() time.Time
-	newID       func(prefix string) string
-	secrets     policy.SecretSource
-	maxAttempts int
-	backoff     func(attempt int) time.Duration
+	store          store.Store
+	actions        *action.Registry
+	now            func() time.Time
+	newID          func(prefix string) string
+	secrets        policy.SecretSource
+	maxAttempts    int
+	pluginBindings json.RawMessage
+	backoff        func(attempt int) time.Duration
 }
 
 func New(state store.Store, actions *action.Registry, options ...Option) *Engine {
@@ -48,6 +49,12 @@ func WithSecrets(source policy.SecretSource) Option {
 			engine.secrets = source
 		}
 	}
+}
+
+// WithPluginBindings saves the resolved local action configuration before any
+// step starts. The CLI restores it when continuing this run in another process.
+func WithPluginBindings(bindings json.RawMessage) Option {
+	return func(engine *Engine) { engine.pluginBindings = append(json.RawMessage(nil), bindings...) }
 }
 
 // WithRetry bounds how many times a transient failure from a read-only action is
@@ -101,6 +108,7 @@ func (e *Engine) Start(ctx context.Context, source []byte, inputs map[string]any
 		WorkflowName:    wf.Name,
 		WorkflowVersion: wf.Version,
 		WorkflowYAML:    append([]byte(nil), source...),
+		PluginBindings:  append(json.RawMessage(nil), e.pluginBindings...),
 		Inputs:          rawInputs,
 		Status:          store.RunRunning,
 		CreatedAt:       now,
@@ -200,6 +208,11 @@ func (e *Engine) execute(
 			return run, e.failRun(ctx, &run, CodePolicyViolation, err.Error(), err)
 		}
 		if err := action.ValidateSchema(actionDefinition.InputSchema, input); err != nil {
+			// Schema diagnostics can include the rejected value (patterns, enums,
+			// formats). Do not persist provider credentials through that route.
+			if len(policy.SecretValues(input, actionDefinition.SecretPaths)) > 0 {
+				err = fmt.Errorf("action input does not match its schema (secret values withheld)")
+			}
 			return run, e.failRun(ctx, &run, CodeActionInput, err.Error(), err)
 		}
 		rawInput, err := json.Marshal(redactedInput)

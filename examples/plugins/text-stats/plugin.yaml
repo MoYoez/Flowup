@@ -1,0 +1,22 @@
+version: 1
+plugins:
+  - name: local.text_stats
+    version: "1.0.0"
+    command: [python, stats.py]
+    files: [stats.py]
+    effect: read_only
+    timeout: 10s
+    input_schema:
+      type: object
+      properties:
+        text: {type: string}
+      required: [text]
+      additionalProperties: false
+    output_schema:
+      type: object
+      properties:
+        characters: {type: integer}
+        lines: {type: integer}
+        preview: {type: string}
+      required: [characters, lines, preview]
+      additionalProperties: false

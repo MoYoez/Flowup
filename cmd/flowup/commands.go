@@ -33,6 +33,8 @@ func runCLI(ctx context.Context, stdout, stderr io.Writer, args []string) int {
 		return 2
 	}
 	switch args[0] {
+	case "plugin":
+		return pluginCommand(stdout, stderr, args[1:])
 	case "validate":
 		return validateCommand(stdout, stderr, args[1:])
 	case "run":
@@ -55,8 +57,14 @@ func runCLI(ctx context.Context, stdout, stderr io.Writer, args []string) int {
 }
 
 func validateCommand(stdout, stderr io.Writer, args []string) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: flowup validate <workflow.yaml>")
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: flowup validate <workflow.yaml> [--plugins <manifest.yaml>]")
+		return 2
+	}
+	flags := flag.NewFlagSet("validate", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	pluginsPath := flags.String("plugins", "", "explicit local plugin manifest (overrides installed plugins)")
+	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		return 2
 	}
 	source, err := os.ReadFile(args[0])
@@ -64,7 +72,17 @@ func validateCommand(stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintf(stderr, "invalid_workflow: read workflow: %v\n", err)
 		return 2
 	}
-	warnings, err := validateSource(source)
+	registry, _, err := workflowRegistry(source, *pluginsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "invalid_workflow: %v\n", err)
+		return 2
+	}
+	wf, err := workflow.Parse(source)
+	if err != nil {
+		fmt.Fprintf(stderr, "invalid_workflow: %v\n", err)
+		return 2
+	}
+	warnings, err := workflow.Validate(wf, registry)
 	if err != nil {
 		fmt.Fprintf(stderr, "invalid_workflow: %v\n", err)
 		return 2
@@ -85,6 +103,7 @@ func runCommand(ctx context.Context, stdout, stderr io.Writer, args []string) in
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	inputsPath := flags.String("inputs", "", "path to workflow inputs JSON")
+	pluginsPath := flags.String("plugins", "", "explicit local plugin manifest (overrides installed plugins)")
 	databasePath := flags.String("db", defaultDatabasePath, "path to SQLite database")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
@@ -108,18 +127,18 @@ func runCommand(ctx context.Context, stdout, stderr io.Writer, args []string) in
 		fmt.Fprintf(stderr, "invalid_inputs: decode inputs: %v\n", err)
 		return 2
 	}
+	registry, bindings, err := workflowRegistry(source, *pluginsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "invalid_workflow: %v\n", err)
+		return 2
+	}
 	state, err := openStore(*databasePath)
 	if err != nil {
 		fmt.Fprintf(stderr, "persistence: %v\n", err)
 		return 1
 	}
 	defer state.Close()
-	registry, err := coreRegistry()
-	if err != nil {
-		fmt.Fprintf(stderr, "internal: %v\n", err)
-		return 1
-	}
-	run, err := engine.New(state, registry).Start(ctx, source, inputs)
+	run, err := engine.New(state, registry, engine.WithPluginBindings(bindings)).Start(ctx, source, inputs)
 	if err != nil {
 		var coded *engine.Error
 		if engine.AsError(err, &coded) && (coded.Code == engine.CodeInvalidWorkflow || coded.Code == engine.CodeInvalidInputs) {
@@ -129,6 +148,7 @@ func runCommand(ctx context.Context, stdout, stderr io.Writer, args []string) in
 		fmt.Fprintln(stderr, err)
 		if run.ID != "" {
 			printRun(stdout, run)
+			printPluginFailure(ctx, stderr, state, run)
 		}
 		return 1
 	}
@@ -155,7 +175,12 @@ func approveCommand(ctx context.Context, stdout, stderr io.Writer, args []string
 		return 1
 	}
 	defer state.Close()
-	registry, err := coreRegistry()
+	approvalRecord, err := state.GetApproval(ctx, approvalID)
+	if err != nil {
+		fmt.Fprintf(stderr, "persistence: %v\n", err)
+		return 1
+	}
+	registry, err := savedRegistry(ctx, state, approvalRecord.RunID)
 	if err != nil {
 		fmt.Fprintf(stderr, "internal: %v\n", err)
 		return 1
@@ -163,6 +188,7 @@ func approveCommand(ctx context.Context, stdout, stderr io.Writer, args []string
 	run, err := engine.New(state, registry).Approve(ctx, approvalID)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
+		printPluginFailure(ctx, stderr, state, run)
 		return 1
 	}
 	printRun(stdout, run)
@@ -221,7 +247,7 @@ func resumeCommand(ctx context.Context, stdout, stderr io.Writer, args []string)
 		return 1
 	}
 	defer state.Close()
-	registry, err := coreRegistry()
+	registry, err := savedRegistry(ctx, state, runID)
 	if err != nil {
 		fmt.Fprintf(stderr, "internal: %v\n", err)
 		return 1
@@ -229,6 +255,7 @@ func resumeCommand(ctx context.Context, stdout, stderr io.Writer, args []string)
 	run, err := engine.New(state, registry).Resume(ctx, runID)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
+		printPluginFailure(ctx, stderr, state, run)
 		return 1
 	}
 	printRun(stdout, run)
@@ -328,7 +355,7 @@ func validateSource(source []byte) ([]workflow.Warning, error) {
 	return workflow.Validate(wf, registry)
 }
 
-func coreRegistry() (*action.Registry, error) {
+func coreRegistry(extra ...action.Action) (*action.Registry, error) {
 	network := policy.DefaultNetworkPolicy()
 	if configured := strings.TrimSpace(os.Getenv("FLOWUP_ALLOWED_HOSTS")); configured != "" {
 		network.AllowedHosts = strings.Split(configured, ",")
@@ -344,7 +371,7 @@ func coreRegistry() (*action.Registry, error) {
 		next:         model.NewOpenAI(baseURL, os.Getenv("OPENAI_API_KEY"), nil),
 		defaultModel: strings.TrimSpace(os.Getenv("FLOWUP_AI_MODEL")),
 	}
-	return action.NewRegistry(
+	actions := []action.Action{
 		httpaction.New(nil, network),
 		jsonaction.NewSelect(),
 		jsonaction.NewValidate(),
@@ -357,7 +384,8 @@ func coreRegistry() (*action.Registry, error) {
 		githubconnector.NewPullRequestComment(githubconnector.Client{}),
 		slackconnector.NewMessageGet(slackconnector.Client{}),
 		slackconnector.NewMessageSend(slackconnector.Client{}),
-	)
+	}
+	return action.NewRegistry(append(actions, extra...)...)
 }
 
 func allowPrivate(value string) bool {
@@ -410,8 +438,10 @@ func printApprovalCommands(output io.Writer, approval store.ApprovalRecord, data
 
 func printUsage(output io.Writer) {
 	fmt.Fprintln(output, "usage:")
-	fmt.Fprintln(output, "  flowup validate <workflow.yaml>")
-	fmt.Fprintln(output, "  flowup run <workflow.yaml> --inputs <inputs.json> [--db <path>]")
+	fmt.Fprintln(output, "  flowup plugin install <local directory or manifest>")
+	fmt.Fprintln(output, "  flowup plugin uninstall <name>")
+	fmt.Fprintln(output, "  flowup validate <workflow.yaml> [--plugins <manifest.yaml>]")
+	fmt.Fprintln(output, "  flowup run <workflow.yaml> --inputs <inputs.json> [--db <path>] [--plugins <manifest.yaml>]")
 	fmt.Fprintln(output, "  flowup status <run-id> [--db <path>]")
 	fmt.Fprintln(output, "  flowup trace <run-id> [--db <path>]")
 	fmt.Fprintln(output, "  flowup approve <approval-id> [--db <path>]")

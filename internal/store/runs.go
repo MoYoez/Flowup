@@ -12,11 +12,11 @@ func (s *SQLiteStore) CreateRun(ctx context.Context, run RunRecord) error {
 		INSERT INTO runs (
 			id, workflow_name, workflow_version, workflow_yaml, inputs_json,
 			output_json, current_step, status, error_code, error_message,
-			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			created_at, updated_at, plugin_bindings_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.ID, run.WorkflowName, run.WorkflowVersion, run.WorkflowYAML, []byte(run.Inputs),
 		[]byte(run.Output), run.CurrentStep, run.Status, run.ErrorCode, run.ErrorMessage,
-		encodeTime(run.CreatedAt), encodeTime(run.UpdatedAt),
+		encodeTime(run.CreatedAt), encodeTime(run.UpdatedAt), []byte(run.PluginBindings),
 	)
 	if err != nil {
 		return fmt.Errorf("create run: %w", err)
@@ -28,7 +28,7 @@ func (s *SQLiteStore) GetRun(ctx context.Context, id string) (RunRecord, error) 
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, workflow_name, workflow_version, workflow_yaml, inputs_json,
 		       output_json, current_step, status, error_code, error_message,
-		       created_at, updated_at
+		       created_at, updated_at, plugin_bindings_json
 		FROM runs WHERE id = ?`, id)
 	return scanRun(row)
 }
@@ -121,12 +121,12 @@ type scanner interface {
 
 func scanRun(row scanner) (RunRecord, error) {
 	var run RunRecord
-	var inputs, output []byte
+	var inputs, output, bindings []byte
 	var createdAt, updatedAt int64
 	if err := row.Scan(
 		&run.ID, &run.WorkflowName, &run.WorkflowVersion, &run.WorkflowYAML, &inputs,
 		&output, &run.CurrentStep, &run.Status, &run.ErrorCode, &run.ErrorMessage,
-		&createdAt, &updatedAt,
+		&createdAt, &updatedAt, &bindings,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return RunRecord{}, ErrNotFound
@@ -134,6 +134,7 @@ func scanRun(row scanner) (RunRecord, error) {
 		return RunRecord{}, fmt.Errorf("scan run: %w", err)
 	}
 	run.Inputs = inputs
+	run.PluginBindings = bindings
 	run.Output = output
 	run.CreatedAt = decodeTime(createdAt)
 	run.UpdatedAt = decodeTime(updatedAt)

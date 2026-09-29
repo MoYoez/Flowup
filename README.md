@@ -11,6 +11,7 @@
 - 在需要确认的地方暂停。审批状态会保存下来，关掉终端也能稍后批准或拒绝。
 - 用 `status` 查看进度，用 `trace` 查看执行事件。进程意外退出后，可以从已保存的位置尝试恢复。
 - 内置 HTTP 请求、JSON 提取与校验，以及 GitHub、Slack 的读写动作。
+- 支持安装本地插件，把 Python、Node 脚本或可执行文件作为工作流动作使用。
 
 目前通过命令行手动启动，步骤顺序执行。审批、配置和恢复的具体行为见[使用指南](docs/usage.md)。
 
@@ -71,6 +72,7 @@ flowup run examples/v1/local-approval.yaml --inputs examples/v1/local-approval.i
 ## 文档
 
 - [使用指南](docs/usage.md)：工作流语法、AI 配置、动作列表、审批、失败处理和命令速查。
+- [本地插件](docs/plugins.md)：安装和卸载插件，以及把自己的脚本接入流程。
 - [设计取舍](docs/decisions.md)：为什么使用顺序步骤、内置动作和本地 SQLite。
 
 ## 开发

@@ -179,6 +179,8 @@ token: ${{ secrets.GITHUB_TOKEN }}
 ## 命令速查
 
 ```text
+flowup plugin install <local directory or manifest>
+flowup plugin uninstall <name>
 flowup validate <workflow.yaml>
 flowup run <workflow.yaml> --inputs <inputs.json> [--db <path>]
 flowup status <run-id> [--db <path>]
@@ -188,12 +190,14 @@ flowup reject <approval-id> [--reason <text>] [--db <path>]
 flowup resume <run-id> [--db <path>]
 ```
 
+在项目目录安装的本地插件会自动用于 `validate` 和 `run`。开发时可以给这两个命令附加 `--plugins <manifest.yaml>`，直接加载源文件。插件格式、安装范围和运行恢复行为见[本地插件](plugins.md)。
+
 `run` 总是需要 `--inputs`；没有输入的工作流也要提供内容为 `{}` 的 JSON 文件。参数顺序按上面的格式写，选项放在文件路径或 ID 后面。
 
 脚本调用时要同时看退出码和运行状态：正常执行或暂停等待审批通常返回 `0`，执行错误返回 `1`，用法或输入错误通常返回 `2`。`reject` 成功拒绝也返回 `1`；对已失败运行执行 `resume` 会返回 `0`，但打印的状态仍然是 `failed`。
 
 ## 当前范围
 
-v1 按声明顺序运行步骤，只能手动启动。暂时没有定时任务、Webhook 接收器、Web UI、HTTP API、并行任务或分布式 Worker，也不执行任意 Shell、Git 命令或用户代码。扩展动作目前需要修改 Go 代码，旧版 pipeline 格式不兼容。
+v1 按声明顺序运行步骤，只能手动启动。暂时没有定时任务、Webhook 接收器、Web UI、HTTP API、并行任务或分布式 Worker。工作流本身不能直接声明 Shell 命令；可以显式安装可信的本地插件扩展动作，无须修改 Go 代码。旧版 pipeline 格式不兼容。
 
 设计上的取舍写在 [docs/decisions.md](decisions.md)。一次实际 CLI 试用的覆盖范围和发现，见 [试用记录](tryout-2026-09-30.md)。

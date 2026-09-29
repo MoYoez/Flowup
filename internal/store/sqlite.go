@@ -120,6 +120,34 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate sqlite: %w", err)
 		}
 	}
+	// Older databases predate local plugins. Bindings are immutable run metadata.
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info(runs)")
+	if err != nil {
+		return fmt.Errorf("inspect run columns: %w", err)
+	}
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notnull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "plugin_bindings_json" {
+			found = true
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if !found {
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE runs ADD COLUMN plugin_bindings_json BLOB"); err != nil {
+			return fmt.Errorf("migrate plugin bindings: %w", err)
+		}
+	}
 	return nil
 }
 

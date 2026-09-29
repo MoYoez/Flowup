@@ -20,6 +20,8 @@ Consequence: a step may reference only inputs and earlier steps.
 
 ## 2026-06-15: Registered declarative actions only
 
+Superseded for explicitly installed trusted local actions by the 2026-09-30 decision below. Built-in actions keep their existing policy boundary.
+
 Decision: every operation is a compiled-in action with schemas and effect
 metadata.
 
@@ -113,3 +115,11 @@ leave a started effect that recovery would treat as indeterminate.
 
 Consequence: pre-send validation failures fail cleanly as `action_input` and
 leave no effect record.
+
+## 2026-09-30: Explicit local action plugins
+
+Decision: add project-local `plugin install` / `plugin uninstall`, plus an explicit manifest override for development. Plugins are argv-based subprocesses with JSON input/output and the same action schemas and effect records as built-ins.
+
+Reason: users should be able to connect existing scripts without rebuilding Flowup or orchestrating them outside the workflow. Installation copies declared files and never executes hooks or downloads dependencies.
+
+Consequence: these are trusted local programs, not sandboxed extensions. Their declared read/write class is not an enforceable capability restriction. Minimal environment inheritance and schema checks do not prevent direct filesystem or network access. Run records persist resolved bindings and file fingerprints before execution. Updating or uninstalling affects new runs; saved runs keep their version files. Unlisted dependencies and external state are not frozen. Historical package directories are retained without automatic garbage collection in this first version.

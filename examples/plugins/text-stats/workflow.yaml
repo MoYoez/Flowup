@@ -1,0 +1,20 @@
+name: local-plugin-example
+version: 1
+inputs:
+  text: {type: string, required: true}
+steps:
+  - id: analyze
+    uses: local.text_stats
+    with:
+      text: ${{ inputs.text }}
+  - id: review
+    uses: approval
+    with:
+      message: "确认文字预览：${{ steps.analyze.output.preview }}"
+      preview: ${{ steps.analyze.output }}
+  - id: analyze_again
+    uses: local.text_stats
+    with:
+      text: ${{ inputs.text }}
+outputs:
+  stats: ${{ steps.analyze_again.output }}

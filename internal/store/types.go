@@ -55,6 +55,7 @@ type RunRecord struct {
 	WorkflowName    string
 	WorkflowVersion int
 	WorkflowYAML    []byte
+	PluginBindings  json.RawMessage
 	Inputs          json.RawMessage
 	Output          json.RawMessage
 	CurrentStep     int
